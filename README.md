@@ -14,10 +14,10 @@ Guardian 뉴스 기사로 영어 표현을 배우는 LangGraph 기반 학습 봇
 
 ## 주요 기능
 
-| Tools | Guardian 검색 / 난이도 판별 / 유의어 찾기 |
-| 병렬 실행 | 번역·분석·예문을 동시에 생성 (Send API) |
-| 조건 분기 | 퀴즈 오답 시 자동으로 재도전 (Conditional Edge) |
-| 메모리 | 세션 끊겨도 학습 기록 유지 (MemorySaver) |
+1. Tools : Guardian 검색 / 난이도 판별 / 유의어 찾기
+2. 병렬 실행 : 번역·분석·예문을 동시에 생성 (Send API)
+3. 조건 분기 : 퀴즈 오답 시 자동으로 재도전 (Conditional Edge)
+4. 메모리 : 세션 끊겨도 학습 기록 유지 (MemorySaver)
 
 ## 실행 흐름
 
