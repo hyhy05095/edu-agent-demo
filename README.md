@@ -34,12 +34,3 @@ Guardian 기사 검색
 ↓
 학습 기록 저장
 ```
-
-## 메모리 (학습 기록)
-
-`thread_id`를 동일하게 유지하면 이전 세션 기록이 이어집니다.
-
-```python
-config = {"configurable": {"thread_id": "user_001"}}
-graph.invoke(initial_state, config=config)
-```

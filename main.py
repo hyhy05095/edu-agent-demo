@@ -9,11 +9,16 @@ from langgraph.checkpoint.memory import MemorySaver
 from langchain_openai import ChatOpenAI
 from langchain_core.tools import tool
 
+from itertools import cycle
+import threading
+import time
 
 # 0. 환경 설정
 
 OPENAI_API_KEY   = st.secrets.get("OPENAI_API_KEY",   os.environ.get("OPENAI_API_KEY", ""))
 GUARDIAN_API_KEY = st.secrets.get("GUARDIAN_API_KEY", os.environ.get("GUARDIAN_API_KEY", ""))
+NEWSAPI_KEY      = st.secrets.get("NEWSAPI_KEY",      os.environ.get("NEWSAPI_KEY", ""))
+
 
 llm            = ChatOpenAI(model="gpt-4o-mini", temperature=0.7, api_key=OPENAI_API_KEY)
 researcher_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.3, api_key=OPENAI_API_KEY)
@@ -36,7 +41,7 @@ def find_synonyms(expression: str) -> str:
 
 @tool
 def search_guardian(expression: str) -> dict:
-    """Guardian API에서 표현이 포함된 기사 문장 2개를 가져온다."""
+    """Guardian API에서 표현이 포함된 기사 문장 2개를 가져온다. 없으면 NewsAPI fallback."""
     url = "https://content.guardianapis.com/search"
     params = {
         "q"          : expression,
@@ -65,8 +70,38 @@ def search_guardian(expression: str) -> dict:
         if len(sentences) >= 2:
             break
 
+    # ✅ Guardian에서 못 찾으면 NewsAPI fallback
+    if len(sentences) < 2 and NEWSAPI_KEY:
+        try:
+            resp2 = requests.get(
+                "https://newsapi.org/v2/everything",
+                params={
+                    "q"        : expression,
+                    "language" : "en",
+                    "sortBy"   : "relevancy",
+                    "pageSize" : 5,
+                    "apiKey"   : NEWSAPI_KEY,
+                },
+                timeout=10,
+            )
+            resp2.raise_for_status()
+            articles = resp2.json().get("articles", [])
+            for article in articles:
+                body  = (article.get("content") or article.get("description") or "")
+                title = article.get("source", {}).get("name", "NewsAPI")
+                for sent in re.split(r'(?<=[.!?])\s+', body):
+                    if pattern.search(sent) and len(sent) > 30:
+                        sentences.append(sent.strip())
+                        sources.append(title)
+                        break
+                if len(sentences) >= 2:
+                    break
+        except Exception:
+            pass
+
+    # 그래도 없으면 빈 문자열
     while len(sentences) < 2:
-        sentences.append(f"No Guardian article found for '{expression}'.")
+        sentences.append(f"No article found for '{expression}'.")
         sources.append("Guardian")
 
     return {"sentences": sentences, "sources": sources}
@@ -458,25 +493,37 @@ with st.sidebar:
 if st.session_state["step"] == "input_expression":
     st.subheader("① 오늘 배울 영어 표현을 입력하세요")
     with st.form("form_expression"):
-        expression = st.text_input("✏️ 표현 입력", placeholder="예: ice")
+        expression = st.text_input("✏️ 표현 입력", placeholder="예: stream")
         submitted  = st.form_submit_button("🚀 학습 시작")
     if submitted and expression.strip():
-        with st.spinner("표현 분석 및 기사 검색 중..."):
-            init_state: State = {
-                "phase": "", "expression": expression.strip(),
-                "article_title": "", "article_date": "", "article_url": "",
-                "article_body_en": "", "article_body_kr": "",
-                "article_analysis": "", "article_examples": "",
-                "writing_input": "", "writing_feedback": "",
-                "quiz_question": "", "quiz_choices": [], "quiz_answer": "",
-                "quiz_input": "", "quiz_feedback": "", "quiz_retry": False,
-                "parallel_results": [], "session_log": [],
-                "orchestrator_tasks": [],   
-                "current_task"      : "",   
-            }
-            result = graph_read.invoke(init_state, config)
-            st.session_state["state"] = result
-            st.session_state["step"]  = "show_reading"
+        init_state: State = {
+            "phase": "", "expression": expression.strip(),
+            "article_title": "", "article_date": "", "article_url": "",
+            "article_body_en": "", "article_body_kr": "",
+            "article_analysis": "", "article_examples": "",
+            "writing_input": "", "writing_feedback": "",
+            "quiz_question": "", "quiz_choices": [], "quiz_answer": "",
+            "quiz_input": "", "quiz_feedback": "", "quiz_retry": False,
+            "parallel_results": [], "session_log": [],
+            "orchestrator_tasks": [],
+            "current_task"      : "",
+        }
+        st.info("⏳ AI가 아래 단계를 순서대로 처리하고 있어요!")
+        progress = st.progress(0, text="🔍 표현 난이도 분석 중...")
+        with st.spinner("🔍 분석 중... 잠시만 기다려주세요!"):
+            try:
+                progress.progress(25, text="📰 Guardian 기사 검색 중...")
+                time.sleep(0.5)
+                progress.progress(50, text="🇰🇷 번역 및 분석 중...")
+                time.sleep(0.5)
+                progress.progress(75, text="📝 예문 생성 중...")
+                result = graph_read.invoke(init_state, config)
+                progress.progress(100, text="✅ 완료!")
+                st.session_state["state"] = result
+                st.session_state["step"]  = "show_reading"
+            except Exception as e:
+                st.error("⚠️ 기사 검색 중 오류가 발생했어요. 잠시 후 다시 시도해주세요!")
+                st.caption(f"오류 상세: {e}")
         st.rerun()
 
 
@@ -529,6 +576,12 @@ elif st.session_state["step"] == "writing":
 
     # 아직 피드백 전: 입력 폼 표시
     if not st.session_state["writing_done"]:
+        # 참고 예문 표시
+        examples = st.session_state["state"].get("article_examples", "")
+        if examples:
+            with st.expander("💡 참고 예문 보기 (클릭해서 펼치기)"):
+                st.markdown(examples)
+
         with st.form("form_writing"):
             writing_input = st.text_area(
                 "표현을 사용한 영어 문장을 작성하세요",
@@ -537,13 +590,18 @@ elif st.session_state["step"] == "writing":
             submitted = st.form_submit_button("📤 제출")
 
         if submitted and writing_input.strip():
-            with st.spinner("피드백 생성 중..."):
-                new_state = {**s, "writing_input": writing_input.strip()}
-                result    = graph_write.invoke(new_state)
-                st.session_state["state"]            = {**s, **result}
-                st.session_state["writing_feedback"] = result.get("writing_feedback", "")
-                st.session_state["writing_input"]    = writing_input.strip()  # 저장!
-                st.session_state["writing_done"]     = True
+            st.info("✏️ AI 튜터가 문장을 꼼꼼히 읽고 있어요!")
+            with st.spinner("💬 피드백 작성 중... 10초 내로 완료돼요!"):
+                try:
+                    new_state = {**s, "writing_input": writing_input.strip()}
+                    result    = graph_write.invoke(new_state)
+                    st.session_state["state"]            = {**s, **result}
+                    st.session_state["writing_feedback"] = result.get("writing_feedback", "")
+                    st.session_state["writing_input"]    = writing_input.strip()
+                    st.session_state["writing_done"]     = True
+                except Exception as e:
+                    st.error("⚠️ 피드백 생성 중 오류가 발생했어요. 다시 제출해보세요!")
+                    st.caption(f"오류 상세: {e}")
             st.rerun()
 
     # 피드백 완료 후: 내 문장 + 피드백 함께 표시
@@ -569,10 +627,16 @@ elif st.session_state["step"] == "quiz":
 
     # 퀴즈 문제 생성
     if not s.get("quiz_question"):
-        with st.spinner("퀴즈 생성 중..."):
-            result = graph_quiz_gen.invoke(s)
-            st.session_state["state"] = {**s, **result}
-            s = st.session_state["state"]
+        st.info("🧠 학습한 표현으로 퀴즈를 만들고 있어요!")
+        with st.spinner("📝 퀴즈 생성 중... 잠깐만요!"):
+            try:
+                result = graph_quiz_gen.invoke(s)
+                st.session_state["state"] = {**s, **result}
+                s = st.session_state["state"]
+            except Exception as e:
+                st.error("⚠️ 퀴즈 생성에 실패했어요. 페이지를 새로고침 해주세요!")
+                st.caption(f"오류 상세: {e}")
+                st.stop()
 
     st.subheader("❓ 퀴즈")
     st.markdown(f"**{s.get('quiz_question','')}**")
@@ -594,12 +658,17 @@ elif st.session_state["step"] == "quiz":
                 submitted = st.form_submit_button("✅ 제출")
 
             if submitted:
-                with st.spinner("채점 중..."):
-                    graded = graph_quiz_grade.invoke({**s, "quiz_input": selected})
-                    st.session_state["state"]       = {**s, **graded}
-                    st.session_state["quiz_graded"] = True      # 채점 완료 플래그
-                    st.session_state["quiz_retry"]  = graded.get("quiz_retry", False)
-                st.rerun()   # rerun으로 블록 밖에서 결과 렌더링
+                st.info("🎯 답안을 채점하고 있어요!")
+                with st.spinner("✅ 채점 중..."):
+                    try:
+                        graded = graph_quiz_grade.invoke({**s, "quiz_input": selected})
+                        st.session_state["state"]       = {**s, **graded}
+                        st.session_state["quiz_graded"] = True
+                        st.session_state["quiz_retry"]  = graded.get("quiz_retry", False)
+                    except Exception as e:
+                        st.error("⚠️ 채점 중 오류가 발생했어요. 다시 제출해보세요!")
+                        st.caption(f"오류 상세: {e}")
+                st.rerun()  # rerun으로 블록 밖에서 결과 렌더링
 
         # 채점 완료 후: 결과 표시 (블록 밖!)
         if st.session_state.get("quiz_graded"):
